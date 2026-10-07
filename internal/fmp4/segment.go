@@ -28,6 +28,11 @@ func ParseSegment(data []byte, idx int, init *Init) (*Segment, *Error) {
 	if err != nil {
 		return nil, boxErr(idx, "media: %v", err)
 	}
+	// Enforce the FullBox version/flags contract of every registered box
+	// type in the media segment (mfhd/tfhd/tfdt/trun/...) first.
+	if rerr := validateFullBoxTree(data, top, idx, "media"); rerr != nil {
+		return nil, rerr
+	}
 	if findBox(top, "moov") != nil {
 		return nil, boxErr(idx, "media: contains moov (an init segment was submitted as media)")
 	}
@@ -235,6 +240,11 @@ func parseTrun(p []byte, seg int, tfhd *tfhdInfo, trex Trex) (samples uint32, du
 		}
 		off += 4
 	}
+	// trun version 1 widens sample_composition_time_offset to 64 bits.
+	compLen := 4
+	if p[0] == 1 {
+		compLen = 8
+	}
 	rec := 0
 	if flags&0x100 != 0 {
 		rec += 4 // sample_duration
@@ -246,7 +256,7 @@ func parseTrun(p []byte, seg int, tfhd *tfhdInfo, trex Trex) (samples uint32, du
 		rec += 4 // sample_flags
 	}
 	if flags&0x800 != 0 {
-		rec += 4 // sample_composition_time_offset
+		rec += compLen // sample_composition_time_offset
 	}
 	need := uint64(count) * uint64(rec)
 	if uint64(len(p)-off) < need {
@@ -275,7 +285,7 @@ func parseTrun(p []byte, seg int, tfhd *tfhdInfo, trex Trex) (samples uint32, du
 			off += 4
 		}
 		if flags&0x800 != 0 {
-			off += 4
+			off += compLen
 		}
 		rd, ok := resolveSample(d, dok, tfhd.hasDur, tfhd.defDur, trex.DefaultSampleDuration)
 		if !ok {

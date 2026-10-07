@@ -24,6 +24,11 @@ func ParseInit(data []byte) (*Init, *Error) {
 	if err != nil {
 		return nil, boxErr(-1, "init: %v", err)
 	}
+	// Enforce the FullBox version/flags contract of every registered box
+	// type in the init segment before relying on its layout.
+	if rerr := validateFullBoxTree(data, top, -1, "init"); rerr != nil {
+		return nil, rerr
+	}
 	if len(top) == 0 || top[0].typ != "ftyp" {
 		return nil, boxErr(-1, "init: first box must be ftyp")
 	}

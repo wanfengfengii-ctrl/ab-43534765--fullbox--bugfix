@@ -84,6 +84,52 @@ func TestEndpointContinuous(t *testing.T) {
 	}
 }
 
+func TestEndpointMfhdVersion(t *testing.T) {
+	h := server.New()
+	init, _ := fixture()
+	// The only defect is an undefined mfhd version (1); samples and payload
+	// are otherwise complete. It must be a BOX_STRUCTURE failure on segment 0.
+	bad := gen.Media(gen.MediaOpts{Sequence: 1, BaseTime: 0, MfhdVersion: 1, TrunFields: true,
+		Samples: []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}})
+	rec := postMultipart(t, h, [][]byte{init, bad})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	var body struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code    string
+			Segment int `json:"segment_index"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.OK || body.Error.Code != fmp4.CodeBoxStructure || body.Error.Segment != 0 {
+		t.Fatalf("bad error body: %s", rec.Body)
+	}
+}
+
+func TestEndpointReservedFlags(t *testing.T) {
+	h := server.New()
+	init, media := fixture()
+	// Reserved flag bit on a media-segment mfhd.
+	bad := gen.PatchFullBox(media[0], "mfhd", 0, 0x800000)
+	rec := postMultipart(t, h, [][]byte{init, bad})
+	if rec.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(rec.Body.String(), fmp4.CodeBoxStructure) {
+		t.Fatalf("media flags: %d %s", rec.Code, rec.Body)
+	}
+
+	// Reserved flag bit on an init-segment tkhd.
+	badInit := gen.PatchFullBox(init, "tkhd", 0, 0x000100)
+	rec = postMultipart(t, h, [][]byte{badInit, media[0]})
+	if rec.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(rec.Body.String(), fmp4.CodeBoxStructure) {
+		t.Fatalf("init flags: %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestEndpointGap(t *testing.T) {
 	h := server.New()
 	init, media := fixture()

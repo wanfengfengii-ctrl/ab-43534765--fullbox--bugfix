@@ -36,6 +36,61 @@ func concat(bs ...[]byte) []byte {
 	return out
 }
 
+// patchContainers are structural boxes whose payload is a box sequence and
+// PatchFullBox may descend into.
+var patchContainers = map[string]bool{
+	"moov": true, "trak": true, "mdia": true, "minf": true,
+	"dinf": true, "stbl": true, "mvex": true, "moof": true, "traf": true,
+}
+
+// PatchFullBox returns a copy of data with the version/flags header bytes of
+// the first box of the given type (searched recursively through structural
+// containers) replaced. The result keeps the same length as the input.
+func PatchFullBox(data []byte, typ string, version byte, flags uint32) []byte {
+	out := append([]byte(nil), data...)
+	if !patchBoxes(out, 0, len(out), typ, version, flags) {
+		panic("gen: box " + typ + " not found")
+	}
+	return out
+}
+
+func patchBoxes(data []byte, base, size int, typ string, version byte, flags uint32) bool {
+	off, end := base, base+size
+	for end-off >= 8 {
+		sz32 := binary.BigEndian.Uint32(data[off:])
+		t := string(data[off+4 : off+8])
+		hdr := 8
+		sz := uint64(sz32)
+		if sz32 == 1 {
+			if end-off < 16 {
+				return false
+			}
+			sz = binary.BigEndian.Uint64(data[off+8:])
+			hdr = 16
+		} else if sz32 == 0 {
+			sz = uint64(end - off)
+		}
+		if sz < uint64(hdr) || off+int(sz) > end {
+			return false
+		}
+		if t == typ && int(sz)-hdr >= 4 {
+			p := off + hdr
+			data[p] = version
+			data[p+1] = byte(flags >> 16)
+			data[p+2] = byte(flags >> 8)
+			data[p+3] = byte(flags)
+			return true
+		}
+		if patchContainers[t] {
+			if patchBoxes(data, off+hdr, int(sz)-hdr, typ, version, flags) {
+				return true
+			}
+		}
+		off += int(sz)
+	}
+	return false
+}
+
 func matrix() []byte {
 	return concat(be32(0x00010000), be32(0), be32(0),
 		be32(0), be32(0x00010000), be32(0),
@@ -51,6 +106,8 @@ type InitOpts struct {
 	ExtraTrack   bool   // append a second (duplicate) trak
 	TrexDuration uint32 // trex default_sample_duration (0 = no default)
 	TrexSize     uint32 // trex default_sample_size (0 = no default)
+	TkhdVersion  byte   // tkhd version: 0 (default) or 1 (64-bit times)
+	MdhdVersion  byte   // mdhd version: 0 (default) or 1 (64-bit times)
 }
 
 // Init builds a minimal but well-formed fMP4 init segment.
@@ -72,14 +129,42 @@ func Init(o InitOpts) []byte {
 		be32(0x00010000), be16(0x0100), be16(0),
 		make([]byte, 8), matrix(), make([]byte, 24), be32(2),
 	))
-	tkhd := FullBox("tkhd", 0, 0x7, concat(
-		be32(0), be32(0), be32(o.TrackID), be32(0), be32(0),
+	tkhdHead := []byte{0, 0, 0, 7} // flags: track_enabled | in_movie | in_preview
+	tkhdHead[0] = o.TkhdVersion
+	var tkhdTimes []byte
+	if o.TkhdVersion == 1 {
+		tkhdTimes = concat(be64(0), be64(0)) // 64-bit creation/modification time
+	} else {
+		tkhdTimes = concat(be32(0), be32(0))
+	}
+	var tkhdDuration []byte
+	if o.TkhdVersion == 1 {
+		tkhdDuration = be64(0)
+	} else {
+		tkhdDuration = be32(0)
+	}
+	tkhd := Box("tkhd", concat(
+		tkhdHead, tkhdTimes, be32(o.TrackID), be32(0), tkhdDuration,
 		make([]byte, 8),
 		be16(0), be16(0), be16(0x0100), be16(0),
 		matrix(), be32(0), be32(0),
 	))
-	mdhd := FullBox("mdhd", 0, 0, concat(
-		be32(0), be32(0), be32(o.Timescale), be32(0), be16(0x55c4), be16(0),
+	mdhdHead := []byte{0, 0, 0, 0} // version overridden below; flags must be zero
+	mdhdHead[0] = o.MdhdVersion
+	var mdhdTimes []byte
+	if o.MdhdVersion == 1 {
+		mdhdTimes = concat(be64(0), be64(0)) // 64-bit creation/modification time
+	} else {
+		mdhdTimes = concat(be32(0), be32(0))
+	}
+	var mdhdDuration []byte
+	if o.MdhdVersion == 1 {
+		mdhdDuration = be64(0)
+	} else {
+		mdhdDuration = be32(0)
+	}
+	mdhd := Box("mdhd", concat(
+		mdhdHead, mdhdTimes, be32(o.Timescale), mdhdDuration, be16(0x55c4), be16(0),
 	))
 	hdlr := FullBox("hdlr", 0, 0, concat(
 		be32(0), []byte(o.Handler), make([]byte, 12), []byte("SoundHandler\x00"),
@@ -124,6 +209,8 @@ type MediaOpts struct {
 	Sequence     uint32 // mfhd sequence_number
 	BaseTime     uint64 // tfdt baseMediaDecodeTime
 	TfdtVersion  byte   // 0 (default) or 1 (64-bit)
+	MfhdVersion  byte   // mfhd version; only 0 is defined (0 = default)
+	TrunVersion  byte   // trun version; 0 (default) or 1
 	Samples      []Sample
 	TrunFields   bool   // write per-sample duration+size into trun
 	TfhdDefaults bool   // write default-sample-duration/size into tfhd (samples must be uniform)
@@ -140,7 +227,7 @@ func Media(o MediaOpts) []byte {
 	if o.TrackID == 0 {
 		o.TrackID = 1
 	}
-	mfhd := FullBox("mfhd", 0, 0, be32(o.Sequence))
+	mfhd := FullBox("mfhd", o.MfhdVersion, 0, be32(o.Sequence))
 
 	tfhdFlags := uint32(0x020000) // default-base-is-moof
 	tfhdPayload := concat(be32(o.TrackID))
@@ -168,7 +255,7 @@ func Media(o MediaOpts) []byte {
 			rec = append(rec, be32(s.Size)...)
 		}
 	}
-	trun := FullBox("trun", 0, trunFlags, concat(be32(uint32(len(o.Samples))), rec))
+	trun := FullBox("trun", o.TrunVersion, trunFlags, concat(be32(uint32(len(o.Samples))), rec))
 
 	trafParts := [][]byte{tfhd}
 	if tfdt != nil {

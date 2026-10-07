@@ -200,6 +200,69 @@ func main() {
 	expectError(*api, "no-mvex", "NO_MVEX", -1,
 		gen.Init(gen.InitOpts{OmitMvex: true}), media[0])
 
+	// 9. single-segment audio: the normal single-fragment case must succeed
+	// with exactly the declared samples and sequence number
+	one := gen.Media(gen.MediaOpts{Sequence: 1, BaseTime: 0, TrunFields: true,
+		Samples: []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}})
+	status, body, err = postAudit(*api, init, one)
+	if err != nil {
+		fail("single-segment", "request error: %v", err)
+	} else if status != http.StatusOK {
+		fail("single-segment", "status %d, want 200 (body: %s)", status, body)
+	} else {
+		var r okResp
+		if err := json.Unmarshal(body, &r); err != nil {
+			fail("single-segment", "bad success JSON: %v", err)
+		} else {
+			want := okResp{
+				OK: true, Timescale: 48000, TrackID: 1, SegmentCount: 1, TotalDuration: 2048,
+				Segments: []segJSON{
+					{Index: 0, Sequence: 1, Start: 0, End: 2048, Samples: 2, Duration: 2048},
+				},
+			}
+			wj, _ := json.Marshal(want)
+			gj, _ := json.Marshal(r)
+			if string(wj) != string(gj) {
+				fail("single-segment", "response mismatch:\n got %s\nwant %s", gj, wj)
+			} else {
+				pass("single-segment")
+			}
+		}
+	}
+
+	// 10. illegal mfhd version (only version 0 is defined)
+	badMfhd := gen.Media(gen.MediaOpts{Sequence: 1, BaseTime: 0, MfhdVersion: 1, TrunFields: true,
+		Samples: []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}})
+	expectError(*api, "mfhd-version", "BOX_STRUCTURE", 0, init, badMfhd)
+
+	// 11. reserved/unknown flag bits on media-segment FullBoxes
+	expectError(*api, "mfhd-flags", "BOX_STRUCTURE", 0, init,
+		gen.PatchFullBox(one, "mfhd", 0, 0x800000))
+	expectError(*api, "tfhd-flags", "BOX_STRUCTURE", 0, init,
+		gen.PatchFullBox(one, "tfhd", 0, 0x800000|0x020000))
+	expectError(*api, "tfdt-flags", "BOX_STRUCTURE", 0, init,
+		gen.PatchFullBox(one, "tfdt", 0, 0x000001))
+	expectError(*api, "trun-flags", "BOX_STRUCTURE", 0, init,
+		gen.PatchFullBox(one, "trun", 0, 0x800000|0x000300))
+
+	// 12. reserved flag bits on init-segment FullBoxes
+	expectError(*api, "tkhd-flags", "BOX_STRUCTURE", -1,
+		gen.PatchFullBox(init, "tkhd", 0, 0x000100), one)
+
+	// 13. legal version-1 tkhd/mdhd and tfdt/trun v1 stay accepted
+	v1Init := gen.Init(gen.InitOpts{TkhdVersion: 1, MdhdVersion: 1})
+	v1Seg := gen.Media(gen.MediaOpts{Sequence: 1, BaseTime: 0, TfdtVersion: 1, TrunVersion: 1,
+		TrunFields: true,
+		Samples:    []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}})
+	status, body, err = postAudit(*api, v1Init, v1Seg)
+	if err != nil {
+		fail("version1-boxes", "request error: %v", err)
+	} else if status != http.StatusOK {
+		fail("version1-boxes", "status %d, want 200 (body: %s)", status, body)
+	} else {
+		pass("version1-boxes")
+	}
+
 	if failures > 0 {
 		fmt.Printf("SMOKE FAILED: %d case(s)\n", failures)
 		os.Exit(1)
