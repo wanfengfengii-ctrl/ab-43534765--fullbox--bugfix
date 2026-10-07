@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"fmp4audit/internal/gen"
@@ -199,6 +200,86 @@ func main() {
 	// 8. init segment without mvex
 	expectError(*api, "no-mvex", "NO_MVEX", -1,
 		gen.Init(gen.InitOpts{OmitMvex: true}), media[0])
+
+	// 9. normal single-segment audio (two samples, sequence 1) succeeds
+	singleInit := gen.Init(gen.InitOpts{Timescale: 48000})
+	singleSeg := gen.Media(gen.MediaOpts{Sequence: 1, BaseTime: 0, TrunFields: true,
+		Samples: []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}})
+	status, body, err = postAudit(*api, singleInit, singleSeg)
+	switch {
+	case err != nil:
+		fail("single-segment", "request error: %v", err)
+	case status != http.StatusOK:
+		fail("single-segment", "status %d, want 200 (body: %s)", status, body)
+	case !strings.Contains(string(body), `"ok":true`) ||
+		!strings.Contains(string(body), `"sequence_number":1`) ||
+		!strings.Contains(string(body), `"samples":2`):
+		fail("single-segment", "bad body: %s", body)
+	default:
+		pass("single-segment")
+	}
+
+	// 10. illegal FullBox versions and reserved flags are BOX_STRUCTURE
+	segOpts := []struct {
+		name string
+		opt  gen.MediaOpts
+	}{
+		{"box-mfhd-version", gen.MediaOpts{Sequence: 1, BaseTime: 0, MfhdVersion: 1, TrunFields: true,
+			Samples: []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}}},
+		{"box-mfhd-flags", gen.MediaOpts{Sequence: 1, BaseTime: 0, MfhdFlags: 0x1, TrunFields: true,
+			Samples: []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}}},
+		{"box-tfhd-version", gen.MediaOpts{Sequence: 1, BaseTime: 0, TfhdVersion: 1, TrunFields: true,
+			Samples: []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}}},
+		{"box-tfhd-flags", gen.MediaOpts{Sequence: 1, BaseTime: 0, TfhdFlags: 0x4,
+			Samples: []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}}},
+		{"box-tfdt-version", gen.MediaOpts{Sequence: 1, BaseTime: 0, TfdtVersion: 2, TrunFields: true,
+			Samples: []gen.Sample{{Dur: 1024, Size: 100}}}},
+		{"box-tfdt-flags", gen.MediaOpts{Sequence: 1, BaseTime: 0, TfdtFlags: 0x1, TrunFields: true,
+			Samples: []gen.Sample{{Dur: 1024, Size: 100}}}},
+		{"box-trun-version", gen.MediaOpts{Sequence: 1, BaseTime: 0, TrunVersion: 2, TrunFields: true,
+			Samples: []gen.Sample{{Dur: 1024, Size: 100}}}},
+		{"box-trun-flags", gen.MediaOpts{Sequence: 1, BaseTime: 0, TrunFlags: 0x2,
+			Samples: []gen.Sample{{Dur: 1024, Size: 100}}}},
+	}
+	for _, c := range segOpts {
+		expectError(*api, c.name, "BOX_STRUCTURE", 0, singleInit, gen.Media(c.opt))
+	}
+
+	// Reserved flags on init FullBoxes are rejected at segment_index -1.
+	for _, c := range []struct {
+		name string
+		opt  gen.InitOpts
+	}{
+		{"box-tkhd-flags", gen.InitOpts{TkhdFlags: 0x8}},
+		{"box-mdhd-flags", gen.InitOpts{MdhdFlags: 0x1}},
+		{"box-trex-version", gen.InitOpts{TrexVersion: 1}},
+		{"box-mvhd-version", gen.InitOpts{MvhdVersion: 2}},
+	} {
+		expectError(*api, c.name, "BOX_STRUCTURE", -1, gen.Init(c.opt), singleSeg)
+	}
+
+	// 11. legal FullBox boundaries keep working: tkhd/mdhd/mvhd/tfdt/trun
+	// version 1 alongside a legal mfhd version 0.
+	v1Init := gen.Init(gen.InitOpts{TkhdVersion: 1, MdhdVersion: 1, MvhdVersion: 1})
+	v1Segs := [][]byte{
+		gen.Media(gen.MediaOpts{Sequence: 1, BaseTime: 1 << 33, TfdtVersion: 1,
+			TrunVersion: 1, TrunFields: true,
+			Samples: []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}}),
+		gen.Media(gen.MediaOpts{Sequence: 2, BaseTime: (1 << 33) + 2048, TfdtVersion: 1,
+			TrunVersion: 1, TrunFields: true,
+			Samples: []gen.Sample{{Dur: 1024, Size: 105}}}),
+	}
+	status, body, err = postAudit(*api, v1Init, v1Segs...)
+	switch {
+	case err != nil:
+		fail("fullbox-v1-legal", "request error: %v", err)
+	case status != http.StatusOK:
+		fail("fullbox-v1-legal", "status %d, want 200 (body: %s)", status, body)
+	case !strings.Contains(string(body), `"ok":true`):
+		fail("fullbox-v1-legal", "bad body: %s", body)
+	default:
+		pass("fullbox-v1-legal")
+	}
 
 	if failures > 0 {
 		fmt.Printf("SMOKE FAILED: %d case(s)\n", failures)

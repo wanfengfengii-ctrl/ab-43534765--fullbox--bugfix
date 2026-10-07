@@ -5,6 +5,7 @@
 服务从零依赖的 Go 标准库实现，逐个解析盒（box）结构，从轨道时标、`trex` 默认采样参数以及每个片段的 `tfhd` / `tfdt` / `trun` 还原实际采样时长与载荷范围，并校验：
 
 - 单一音轨（`hdlr` = `soun`）且存在 `mvex`/`trex`；
+- 各 ISO BMFF FullBox 的 `version`/`flags` 符合该盒类型的既有契约（未定义版本、未知或保留标志位一律按结构错误拒绝）；
 - 轨道一致（`tfhd.track_ID` 与 init 轨道一致）；
 - 片段序号（`mfhd.sequence_number`）严格递增；
 - 采样时长/尺寸可经 `trun → tfhd → trex` 链完整继承；
@@ -72,7 +73,7 @@ curl -s http://localhost:8080/api/fmp4/audit \
 | 400 | `BAD_PART_COUNT` | part 数量不符（须为 1 个 init + 1–32 个媒体片段） |
 | 400 | `EMPTY_PART` | 存在空 part |
 | 413 | `TOO_LARGE` | 合计载荷超过 16 MiB |
-| 422 | `BOX_STRUCTURE` | 盒结构非法（截断、尺寸越界、缺失必需盒、init/媒体位置错放等） |
+| 422 | `BOX_STRUCTURE` | 盒结构非法（截断、尺寸越界、缺失必需盒、init/媒体位置错放、FullBox 使用未定义 version 或未知/保留 flags 等） |
 | 422 | `NOT_SINGLE_AUDIO_TRACK` | 非单一音轨（轨道数 ≠ 1 或 handler 非 `soun`） |
 | 422 | `NO_MVEX` | init 缺少 `mvex`（非分片 MP4） |
 | 422 | `NO_TREX` | `mvex` 中无该轨道的 `trex` |

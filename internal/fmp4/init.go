@@ -30,6 +30,9 @@ func ParseInit(data []byte) (*Init, *Error) {
 	if findBox(top, "moof") != nil || findBox(top, "mdat") != nil {
 		return nil, boxErr(-1, "init: contains moof/mdat (a media segment was submitted as init)")
 	}
+	if e := validateFullBoxes(data, top, -1); e != nil {
+		return nil, e
+	}
 	moovs := filterBoxes(top, "moov")
 	if len(moovs) == 0 {
 		return nil, boxErr(-1, "init: missing moov")

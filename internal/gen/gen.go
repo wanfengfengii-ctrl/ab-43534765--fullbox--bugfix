@@ -51,6 +51,17 @@ type InitOpts struct {
 	ExtraTrack   bool   // append a second (duplicate) trak
 	TrexDuration uint32 // trex default_sample_duration (0 = no default)
 	TrexSize     uint32 // trex default_sample_size (0 = no default)
+
+	// FullBox version/flags overrides. Version 0 and zero flags select the
+	// spec/default encoding; nonzero values override them.
+	MvhdVersion int
+	MvhdFlags   int
+	TkhdVersion int
+	TkhdFlags   int
+	MdhdVersion int
+	MdhdFlags   int
+	TrexVersion int
+	TrexFlags   int
 }
 
 // Init builds a minimal but well-formed fMP4 init segment.
@@ -67,19 +78,79 @@ func Init(o InitOpts) []byte {
 
 	ftyp := Box("ftyp", concat([]byte("isom"), be32(0x200), []byte("isomiso6mp41dash")))
 
-	mvhd := FullBox("mvhd", 0, 0, concat(
-		be32(0), be32(0), be32(1000), be32(0),
+	mvhdVer, mvhdFlags := byte(0), uint32(0)
+	if o.MvhdVersion > 0 {
+		mvhdVer = byte(o.MvhdVersion)
+	}
+	if o.MvhdFlags > 0 {
+		mvhdFlags = uint32(o.MvhdFlags)
+	}
+	var mvhdTimes []byte // creation/modification time + duration (timescale follows)
+	if mvhdVer == 1 {
+		mvhdTimes = concat(be64(0), be64(0))
+	} else {
+		mvhdTimes = concat(be32(0), be32(0))
+	}
+	mvhdTail := concat(be32(1000))
+	if mvhdVer == 1 {
+		mvhdTail = append(mvhdTail, be64(0)...)
+	} else {
+		mvhdTail = append(mvhdTail, be32(0)...)
+	}
+	mvhd := FullBox("mvhd", mvhdVer, mvhdFlags, concat(
+		mvhdTimes, mvhdTail,
 		be32(0x00010000), be16(0x0100), be16(0),
 		make([]byte, 8), matrix(), make([]byte, 24), be32(2),
 	))
-	tkhd := FullBox("tkhd", 0, 0x7, concat(
-		be32(0), be32(0), be32(o.TrackID), be32(0), be32(0),
+
+	tkhdVer, tkhdFlags := byte(0), uint32(0x7)
+	if o.TkhdVersion > 0 {
+		tkhdVer = byte(o.TkhdVersion)
+	}
+	if o.TkhdFlags > 0 {
+		tkhdFlags = uint32(o.TkhdFlags)
+	}
+	var tkhdTimes []byte
+	if tkhdVer == 1 {
+		tkhdTimes = concat(be64(0), be64(0))
+	} else {
+		tkhdTimes = concat(be32(0), be32(0))
+	}
+	tkhdID := concat(be32(o.TrackID), be32(0))
+	var tkhdDur []byte
+	if tkhdVer == 1 {
+		tkhdDur = be64(0)
+	} else {
+		tkhdDur = be32(0)
+	}
+	tkhd := FullBox("tkhd", tkhdVer, tkhdFlags, concat(
+		tkhdTimes, tkhdID, tkhdDur,
 		make([]byte, 8),
 		be16(0), be16(0), be16(0x0100), be16(0),
 		matrix(), be32(0), be32(0),
 	))
-	mdhd := FullBox("mdhd", 0, 0, concat(
-		be32(0), be32(0), be32(o.Timescale), be32(0), be16(0x55c4), be16(0),
+
+	mdhdVer, mdhdFlags := byte(0), uint32(0)
+	if o.MdhdVersion > 0 {
+		mdhdVer = byte(o.MdhdVersion)
+	}
+	if o.MdhdFlags > 0 {
+		mdhdFlags = uint32(o.MdhdFlags)
+	}
+	var mdhdTimes []byte
+	if mdhdVer == 1 {
+		mdhdTimes = concat(be64(0), be64(0))
+	} else {
+		mdhdTimes = concat(be32(0), be32(0))
+	}
+	var mdhdDur []byte
+	if mdhdVer == 1 {
+		mdhdDur = be64(0)
+	} else {
+		mdhdDur = be32(0)
+	}
+	mdhd := FullBox("mdhd", mdhdVer, mdhdFlags, concat(
+		mdhdTimes, be32(o.Timescale), mdhdDur, be16(0x55c4), be16(0),
 	))
 	hdlr := FullBox("hdlr", 0, 0, concat(
 		be32(0), []byte(o.Handler), make([]byte, 12), []byte("SoundHandler\x00"),
@@ -111,7 +182,14 @@ func Init(o InitOpts) []byte {
 		moovChildren = append(moovChildren, trak)
 	}
 	if !o.OmitMvex {
-		trex := FullBox("trex", 0, 0, concat(
+		trexVer, trexFlags := byte(0), uint32(0)
+		if o.TrexVersion > 0 {
+			trexVer = byte(o.TrexVersion)
+		}
+		if o.TrexFlags > 0 {
+			trexFlags = uint32(o.TrexFlags)
+		}
+		trex := FullBox("trex", trexVer, trexFlags, concat(
 			be32(o.TrackID), be32(1), be32(o.TrexDuration), be32(o.TrexSize), be32(0),
 		))
 		moovChildren = append(moovChildren, Box("mvex", trex))
@@ -133,6 +211,16 @@ type MediaOpts struct {
 	MdatExtra    int  // append this many stray bytes to mdat
 	MdatCut      int  // drop this many bytes from the mdat tail
 	WithStyp     bool // prepend a segment-type box
+
+	// FullBox version/flags overrides. Version 0 and zero flags select the
+	// default (computed) encoding; nonzero values override them.
+	MfhdVersion int
+	MfhdFlags   int
+	TfhdVersion int
+	TfhdFlags   int
+	TfdtFlags   int
+	TrunVersion int
+	TrunFlags   int
 }
 
 // Media builds one media segment: [styp] moof(mfhd, traf(tfhd, tfdt, trun)) mdat.
@@ -140,7 +228,14 @@ func Media(o MediaOpts) []byte {
 	if o.TrackID == 0 {
 		o.TrackID = 1
 	}
-	mfhd := FullBox("mfhd", 0, 0, be32(o.Sequence))
+	mfhdVersion, mfhdFlags := byte(0), uint32(0)
+	if o.MfhdVersion > 0 {
+		mfhdVersion = byte(o.MfhdVersion)
+	}
+	if o.MfhdFlags > 0 {
+		mfhdFlags = uint32(o.MfhdFlags)
+	}
+	mfhd := FullBox("mfhd", mfhdVersion, mfhdFlags, be32(o.Sequence))
 
 	tfhdFlags := uint32(0x020000) // default-base-is-moof
 	tfhdPayload := concat(be32(o.TrackID))
@@ -148,14 +243,28 @@ func Media(o MediaOpts) []byte {
 		tfhdFlags |= 0x8 | 0x10
 		tfhdPayload = concat(tfhdPayload, be32(o.Samples[0].Dur), be32(o.Samples[0].Size))
 	}
-	tfhd := FullBox("tfhd", 0, tfhdFlags, tfhdPayload)
+	tfhdVersion := byte(0)
+	if o.TfhdVersion > 0 {
+		tfhdVersion = byte(o.TfhdVersion)
+	}
+	if o.TfhdFlags > 0 {
+		tfhdFlags = uint32(o.TfhdFlags)
+	}
+	tfhd := FullBox("tfhd", tfhdVersion, tfhdFlags, tfhdPayload)
 
 	var tfdt []byte
 	if !o.OmitTfdt {
+		tfdtFlags := uint32(0)
+		if o.TfdtFlags > 0 {
+			tfdtFlags = uint32(o.TfdtFlags)
+		}
 		if o.TfdtVersion == 1 {
-			tfdt = FullBox("tfdt", 1, 0, be64(o.BaseTime))
+			tfdt = FullBox("tfdt", 1, tfdtFlags, be64(o.BaseTime))
 		} else {
-			tfdt = FullBox("tfdt", 0, 0, be32(uint32(o.BaseTime)))
+			// Version 0 is the legal 32-bit form; other version bytes let
+			// tests exercise the contract check (which fires before the
+			// baseMediaDecodeTime field is decoded).
+			tfdt = FullBox("tfdt", o.TfdtVersion, tfdtFlags, be32(uint32(o.BaseTime)))
 		}
 	}
 
@@ -168,7 +277,14 @@ func Media(o MediaOpts) []byte {
 			rec = append(rec, be32(s.Size)...)
 		}
 	}
-	trun := FullBox("trun", 0, trunFlags, concat(be32(uint32(len(o.Samples))), rec))
+	trunVersion := byte(0)
+	if o.TrunVersion > 0 {
+		trunVersion = byte(o.TrunVersion)
+	}
+	if o.TrunFlags > 0 {
+		trunFlags = uint32(o.TrunFlags)
+	}
+	trun := FullBox("trun", trunVersion, trunFlags, concat(be32(uint32(len(o.Samples))), rec))
 
 	trafParts := [][]byte{tfhd}
 	if tfdt != nil {

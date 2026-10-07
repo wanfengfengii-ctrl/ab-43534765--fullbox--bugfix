@@ -178,6 +178,58 @@ func TestEndpointEmptyPart(t *testing.T) {
 	}
 }
 
+// TestEndpointFullBoxContract checks the reported regression end to end:
+// an illegal mfhd version must produce HTTP 422 / BOX_STRUCTURE /
+// segment_index 0, while a legal single-segment audio request succeeds.
+func TestEndpointFullBoxContract(t *testing.T) {
+	h := server.New()
+	init := gen.Init(gen.InitOpts{Timescale: 48000})
+	samples := []gen.Sample{{Dur: 1024, Size: 100}, {Dur: 1024, Size: 110}}
+
+	// Illegal mfhd version 1.
+	bad := gen.Media(gen.MediaOpts{Sequence: 1, BaseTime: 0, MfhdVersion: 1, TrunFields: true,
+		Samples: samples})
+	rec := postMultipart(t, h, [][]byte{init, bad})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("illegal mfhd version: status %d: %s", rec.Code, rec.Body)
+	}
+	var body struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code    string
+			Segment int `json:"segment_index"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.OK || body.Error.Code != fmp4.CodeBoxStructure || body.Error.Segment != 0 {
+		t.Fatalf("illegal mfhd version: bad body %s", rec.Body)
+	}
+
+	// Reserved mfhd flag bit.
+	bad = gen.Media(gen.MediaOpts{Sequence: 1, BaseTime: 0, MfhdFlags: 0x1, TrunFields: true,
+		Samples: samples})
+	rec = postMultipart(t, h, [][]byte{init, bad})
+	if rec.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(rec.Body.String(), fmp4.CodeBoxStructure) ||
+		!strings.Contains(rec.Body.String(), `"segment_index":0`) {
+		t.Fatalf("reserved mfhd flag: %d %s", rec.Code, rec.Body)
+	}
+
+	// Normal single-segment audio must still succeed with two samples.
+	good := gen.Media(gen.MediaOpts{Sequence: 1, BaseTime: 0, TrunFields: true, Samples: samples})
+	rec = postMultipart(t, h, [][]byte{init, good})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legal single segment: status %d: %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"ok":true`) ||
+		!strings.Contains(rec.Body.String(), `"sequence_number":1`) ||
+		!strings.Contains(rec.Body.String(), `"samples":2`) {
+		t.Fatalf("legal single segment: bad body %s", rec.Body)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	h := server.New()
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)

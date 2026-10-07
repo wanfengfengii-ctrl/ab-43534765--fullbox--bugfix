@@ -28,6 +28,9 @@ func ParseSegment(data []byte, idx int, init *Init) (*Segment, *Error) {
 	if err != nil {
 		return nil, boxErr(idx, "media: %v", err)
 	}
+	if e := validateFullBoxes(data, top, idx); e != nil {
+		return nil, e
+	}
 	if findBox(top, "moov") != nil {
 		return nil, boxErr(idx, "media: contains moov (an init segment was submitted as media)")
 	}
